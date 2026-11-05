@@ -1,0 +1,20 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Data lives outside git:
+#  - fca.duckdb + extract_state.json are stored in the "warehouse" GitHub Release
+#    (they outgrow git's 100 MB file limit); the daily workflow downloads/uploads them
+#  - raw JSONL extracts are loaded into fca.duckdb, so they don't need keeping
+fca.duckdb
+fca.duckdb.wal
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/firms_2026-08-11.jsonl
+
+dbt/fca_dbt/target/
+dbt/fca_dbt/dbt_packages/
+dbt/fca_dbt/logs/
+logs/

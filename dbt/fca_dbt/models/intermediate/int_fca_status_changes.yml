@@ -1,0 +1,8 @@
+version: 2
+
+models:
+  - name: int_fca_status_changes
+    description: Status transitions detected between pipeline runs.
+    columns:
+      - name: frn
+        data_tests: [not_null]

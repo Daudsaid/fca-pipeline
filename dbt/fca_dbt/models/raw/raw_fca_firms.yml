@@ -1,0 +1,18 @@
+version: 2
+
+models:
+  - name: raw_fca_firms
+    description: >
+      Every distinct version of every firm extracted from the FCA Register API (JSON,
+      self-link fields removed). A new row only when the firm's content changed.
+    columns:
+      - name: frn
+        data_tests: [not_null]
+      - name: firm
+        description: JSON body of GET /Firm/{frn}
+      - name: addresses
+        description: JSON array from GET /Firm/{frn}/Address
+      - name: source_file
+        data_tests: [not_null]
+      - name: record_hash
+        description: md5 of the firm + addresses JSON, ignoring the API's System Timestamp

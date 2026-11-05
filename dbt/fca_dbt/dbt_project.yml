@@ -1,0 +1,30 @@
+name: fca_dbt
+version: "3.0.0"
+config-version: 2
+profile: fca_dbt
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # where extract_fca.py writes its JSONL files (relative to this dbt project)
+  raw_files: "{{ env_var('RAW_FILES', '../../data/raw/firms_*.jsonl') }}"
+
+models:
+  fca_dbt:
+    raw:
+      +schema: raw
+      +materialized: incremental
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table

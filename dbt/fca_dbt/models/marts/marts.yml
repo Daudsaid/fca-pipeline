@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: mart_fca_firms_current
+    description: Current state of every tracked firm.
+    columns:
+      - name: frn
+        data_tests: [unique, not_null]
+  - name: mart_fca_status_summary
+    description: Count and share of firms by current status.
+    columns:
+      - name: status
+        data_tests: [unique]
+  - name: mart_fca_status_changes_monthly
+    description: Monthly count of status transitions.

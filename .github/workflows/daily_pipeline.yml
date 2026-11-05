@@ -1,0 +1,75 @@
+name: FCA pipeline
+
+# Every 6 hours: download the warehouse from the "warehouse" release, refresh the
+# least-recently-checked firms, spend the remaining time continuing the FRN sweep,
+# rebuild dbt, and upload the warehouse again. Runs never overlap (concurrency).
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"      # 00:17, 06:17, 12:17, 18:17 UTC
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Firms to refresh before sweeping (default 750)"
+        required: false
+        default: ""
+      minutes:
+        description: "Max extract minutes (default 290)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write                # to update the warehouse release
+
+concurrency:
+  group: fca-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download warehouse
+        run: |
+          mkdir -p /tmp/wh data/raw
+          if gh release download warehouse -D /tmp/wh -p fca.duckdb -p extract_state.json; then
+            mv /tmp/wh/fca.duckdb . && mv /tmp/wh/extract_state.json data/raw/ || true
+            ls -lh fca.duckdb
+          else
+            echo "No warehouse release yet: starting from the seed data"
+          fi
+
+      - name: Run pipeline (extract -> dbt build)
+        env:
+          FCA_API_EMAIL: ${{ secrets.FCA_API_EMAIL }}
+          FCA_API_KEY: ${{ secrets.FCA_API_KEY }}
+        run: |
+          bash run_pipeline.sh \
+            --limit "${{ inputs.limit || vars.FCA_FIRM_LIMIT || '750' }}" \
+            --max-minutes "${{ inputs.minutes || '290' }}"
+
+      - name: Progress
+        if: always()
+        run: python extract/extract_fca.py status || true
+
+      - name: Upload warehouse
+        if: always()
+        run: |
+          [ -f fca.duckdb ] || { echo "no warehouse to upload"; exit 0; }
+          gh release view warehouse >/dev/null 2>&1 || \
+            gh release create warehouse --title "Warehouse (fca.duckdb)" \
+              --notes "Latest DuckDB warehouse + extractor state, updated daily by the pipeline."
+          gh release upload warehouse fca.duckdb data/raw/extract_state.json --clobber

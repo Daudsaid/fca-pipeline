@@ -1,0 +1,8 @@
+fca_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # single-file warehouse at the project root (override with DUCKDB_PATH)
+      path: "{{ env_var('DUCKDB_PATH', '../../fca.duckdb') }}"
+      threads: 4

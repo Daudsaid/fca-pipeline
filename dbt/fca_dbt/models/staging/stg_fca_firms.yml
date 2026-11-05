@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: stg_fca_firms
+    description: Latest known record for each FCA-registered firm.
+    columns:
+      - name: frn
+        description: Firm Reference Number
+        data_tests: [unique, not_null]
+      - name: status
+        data_tests:
+          - not_null:
+              config: {severity: warn}
+      - name: firm_name
+        data_tests:
+          - not_null:
+              config: {severity: warn}
