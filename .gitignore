@@ -26,3 +26,6 @@ logs/
 # generated
 site/
 .pytest_cache/
+
+# local DuckDB 1.x-compatible copy for DBeaver
+fca_dbeaver.duckdb
