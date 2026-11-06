@@ -1,0 +1,6 @@
+# Streamlit Community Cloud installs this file (it sits next to the app)
+streamlit==1.67.0
+duckdb==2.0.0
+pandas
+requests
+altair

@@ -3,7 +3,7 @@
 [![CI](https://github.com/Daudsaid/fca-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Daudsaid/fca-pipeline/actions/workflows/ci.yml)
 [![FCA pipeline](https://github.com/Daudsaid/fca-pipeline/actions/workflows/daily_pipeline.yml/badge.svg)](https://github.com/Daudsaid/fca-pipeline/actions/workflows/daily_pipeline.yml)
 
-**[Live dashboard](https://daudsaid.github.io/fca-pipeline/)** · **[dbt docs & lineage](https://daudsaid.github.io/fca-pipeline/dbt/)**
+**[Live dashboard](https://daudsaid.github.io/fca-pipeline/)** · **[Streamlit explorer](https://fca-pipeline.streamlit.app)** · **[dbt docs & lineage](https://daudsaid.github.io/fca-pipeline/dbt/)**
 
 An **ELT pipeline** on real data from the UK Financial Conduct Authority's
 Financial Services Register. It tracks how regulated firms' authorisation status
@@ -31,7 +31,7 @@ FCA Register API ──► extract_fca.py ──► data/raw/firms_<date>.jsonl
 | Transform + tests | dbt (`dbt-duckdb`) |
 | Orchestration | `run_pipeline.sh` + GitHub Actions cron (every 6 h) |
 | Testing | pytest (extractor + API client against a stand-in API) + 19 dbt data tests, on every push |
-| Reporting | Static dashboard + dbt docs, rebuilt every run and published on GitHub Pages |
+| Reporting | Streamlit explorer (search, filters, per-firm history) + static dashboard and dbt docs on GitHub Pages |
 
 ## dbt models
 | Layer | Model | What it is |
@@ -116,6 +116,18 @@ Setup, once:
 
 To work locally again later, download the latest first:
 `gh release download warehouse -p fca.duckdb && gh release download warehouse -p extract_state.json -D data/raw --clobber`
+
+## Streamlit explorer
+`app/streamlit_app.py` is an interactive front end on the warehouse: KPIs, charts,
+filters by register status / business type / town, firm search by name or FRN, and
+each firm's tracked SCD2 history. It loads the latest `fca.duckdb` from the
+`warehouse` release (re-checked hourly), or a local `fca.duckdb` if present.
+```bash
+uv pip install -r app/requirements.txt
+streamlit run app/streamlit_app.py
+```
+Deployed free on [Streamlit Community Cloud](https://share.streamlit.io): repo
+`Daudsaid/fca-pipeline`, branch `main`, main file `app/streamlit_app.py`.
 
 ## Tests
 ```bash
