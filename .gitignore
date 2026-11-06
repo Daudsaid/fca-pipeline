@@ -17,4 +17,12 @@ data/raw/*
 dbt/fca_dbt/target/
 dbt/fca_dbt/dbt_packages/
 dbt/fca_dbt/logs/
+
+# generated
+site/
+.pytest_cache/
 logs/
+
+# generated
+site/
+.pytest_cache/

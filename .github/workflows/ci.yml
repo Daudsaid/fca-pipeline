@@ -1,0 +1,29 @@
+name: CI
+
+# On every push and pull request: unit tests (against a stand-in FCA API)
+# and a full dbt build + tests on the committed seed data.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests (extractor + API client)
+        run: python -m pytest -v tests
+
+      - name: dbt build on seed data
+        run: bash run_pipeline.sh --skip-extract

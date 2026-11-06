@@ -1,9 +1,14 @@
 # FCA Register Pipeline
 
+[![CI](https://github.com/Daudsaid/fca-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Daudsaid/fca-pipeline/actions/workflows/ci.yml)
+[![FCA pipeline](https://github.com/Daudsaid/fca-pipeline/actions/workflows/daily_pipeline.yml/badge.svg)](https://github.com/Daudsaid/fca-pipeline/actions/workflows/daily_pipeline.yml)
+
+**[Live dashboard](https://daudsaid.github.io/fca-pipeline/)** · **[dbt docs & lineage](https://daudsaid.github.io/fca-pipeline/dbt/)**
+
 An **ELT pipeline** on real data from the UK Financial Conduct Authority's
 Financial Services Register. It tracks how regulated firms' authorisation status
 changes over time using **dbt SCD Type 2 snapshots**, stored in a single-file
-**DuckDB** warehouse and refreshed daily by **GitHub Actions**.
+**DuckDB** warehouse and refreshed every 6 hours by **GitHub Actions**.
 
 No Docker, no servers, no Airflow: `pip install` and one command.
 
@@ -24,7 +29,9 @@ FCA Register API ──► extract_fca.py ──► data/raw/firms_<date>.jsonl
 | Extract | Python + `requests` (rate-limited, retrying, resumable) |
 | Load + warehouse | DuckDB (`fca.duckdb`, one file) |
 | Transform + tests | dbt (`dbt-duckdb`) |
-| Orchestration | `run_pipeline.sh` + GitHub Actions daily cron |
+| Orchestration | `run_pipeline.sh` + GitHub Actions cron (every 6 h) |
+| Testing | pytest (extractor + API client against a stand-in API) + 19 dbt data tests, on every push |
+| Reporting | Static dashboard + dbt docs, rebuilt every run and published on GitHub Pages |
 
 ## dbt models
 | Layer | Model | What it is |
@@ -68,42 +75,56 @@ the extractor has resumable modes (`python extract/extract_fca.py --help`):
 |---|---|
 | `sweep` | Tries every FRN from 100,000 to 1,050,000; fetches the ones that exist. Checkpointed, so it resumes where it stopped. **This is how you get (nearly) the whole Register.** |
 | `refresh` | Re-fetches known firms, least recently checked first, so every firm is revisited in rotation and status changes are caught |
+| `frontier` | Checks the newest FRN range (3,000 below to 1,000 above the highest FRN found) for newly registered firms, so the data stays complete after the backfill |
 | `search` | Finds firms through the Search endpoint: quick, but only what the search terms match |
-| `auto` | *(default)* `refresh` up to `--limit` firms, then continue the `sweep` until `--max-minutes` |
+| `auto` | *(default)* `refresh` up to `--limit` firms, `frontier` (once a day), then continue the `sweep` until `--max-minutes` |
 | `status` | Shows progress (known firms, sweep %, oldest refresh). No API calls |
 
-**Backfill.** At the default pace (one call every 0.5 s) the full sweep is ~950k FRN
-checks, so roughly **6 days of running time**. It doesn't have to be continuous:
+**Backfill.** The full sweep is ~950k FRN checks: roughly **3 days of running time** at
+one call every 0.25 s (GitHub Actions default), 6 days at 0.5 s (local default). It doesn't have to be continuous:
 ```bash
 caffeinate -i bash run_pipeline.sh sweep --max-minutes 600   # 10 h on a Mac without sleeping
 python extract/extract_fca.py status                          # check progress any time
 ```
 Stop it any time (Ctrl+C); it saves its position and the next run carries on.
-Alternatively let GitHub Actions do it: each daily run spends its spare time
-(~4 h) on the sweep, finishing the backfill in roughly 5 weeks.
+Alternatively let GitHub Actions do it: each run (every 6 hours) spends its spare
+time (~4.5 h) on the sweep, finishing the backfill in roughly a week.
 
 **Run only one copy at a time** (laptop *or* GitHub Actions): they share one API key
 and one state file.
 
-## Daily schedule (GitHub Actions)
-`.github/workflows/daily_pipeline.yml` runs every day at 01:17 UTC:
+## Schedule (GitHub Actions)
+`.github/workflows/daily_pipeline.yml` runs every 6 hours (00:17, 06:17, 12:17, 18:17 UTC):
 1. downloads `fca.duckdb` + `extract_state.json` from the repo's **`warehouse` release**
-2. refreshes the 3,000 least-recently-checked firms, then continues the sweep (max 4.5 h)
+2. refreshes the 750 least-recently-checked firms, scans the newest FRNs for new firms
+   (once a day), then continues the sweep (max ~4.8 h)
 3. `dbt build`, then uploads the updated files back to the release
+4. rebuilds the dashboard + dbt docs and publishes them to GitHub Pages
 
 The warehouse is kept in a release, not in git, because at full size it is larger
 than git's 100 MB file limit (roughly 45 MB per 100k firm versions).
 
 Setup, once:
-1. Push the repo to GitHub.
+1. Push the repo to GitHub as a **public** repo (unlimited free Actions minutes;
+   a private repo's 2,000 free minutes/month would run out in about a week).
 2. **Settings → Secrets and variables → Actions**: add secrets `FCA_API_EMAIL` and
-   `FCA_API_KEY` (optional variable `FCA_FIRM_LIMIT`).
-3. If you've already built data locally, upload it so CI continues from there:
+   `FCA_API_KEY` (optional variables `FCA_FIRM_LIMIT`, `FCA_MIN_INTERVAL`).
+3. **Settings → Pages → Source: GitHub Actions** to publish the dashboard.
+4. If you've already built data locally, upload it so CI continues from there:
    `gh release create warehouse fca.duckdb data/raw/extract_state.json --title "Warehouse (fca.duckdb)"`
-4. **Actions** tab → *Daily FCA pipeline* → **Run workflow** to test it.
+5. **Actions** tab → *FCA pipeline* → **Run workflow** to test it.
 
 To work locally again later, download the latest first:
 `gh release download warehouse -p fca.duckdb && gh release download warehouse -p extract_state.json -D data/raw --clobber`
+
+## Tests
+```bash
+uv pip install -r requirements-dev.txt
+python -m pytest -v tests                  # extractor + API client, against a stand-in FCA API
+bash run_pipeline.sh --skip-extract        # dbt build + 19 data tests on the seed data
+python dashboard/build_dashboard.py        # dashboard -> site/index.html
+```
+The `CI` workflow runs the first two on every push and pull request.
 
 ## About the data
 - `data/raw/firms_2026-08-11.jsonl` is a seed of 269 real firms pulled in August 2026.

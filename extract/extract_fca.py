@@ -9,10 +9,14 @@ so getting as much data as possible is done in resumable modes:
            checkpointed, so a multi-day backfill can be stopped and resumed.
   refresh  Re-fetch known firms, least-recently-fetched first, so every firm is
            revisited in rotation and status changes get picked up.
+  frontier Check the newest FRN range (around the highest FRN found so far) for
+           newly registered firms. FRNs are issued roughly in order, so this is
+           how firms registered after the backfill get discovered.
   search   Discover FRNs through the Search endpoint (quick, but only finds what
            the search terms match).
-  auto     (default) refresh up to --limit firms, then spend any remaining
-           --max-minutes continuing the sweep. This is what the daily job runs.
+  auto     (default) refresh up to --limit firms, run the frontier scan (once a
+           day), then spend any remaining --max-minutes continuing the sweep.
+           This is what the scheduled job runs.
   status   Show progress. No API calls.
 
 Every fetched firm is appended as one JSON line to data/raw/firms_<YYYY-MM-DD>.jsonl
@@ -21,6 +25,7 @@ Every fetched firm is appended as one JSON line to data/raw/firms_<YYYY-MM-DD>.j
 Examples:
     python extract/extract_fca.py sweep --max-minutes 600     # backfill for 10 hours
     python extract/extract_fca.py refresh --limit 500
+    python extract/extract_fca.py frontier
     python extract/extract_fca.py search --limit 200
     python extract/extract_fca.py --limit 2000 --max-minutes 330
     python extract/extract_fca.py status
@@ -51,6 +56,12 @@ log = logging.getLogger("extract_fca")
 DEFAULT_SWEEP_START = 100_000
 DEFAULT_SWEEP_END = 1_050_000
 
+# Frontier scan: FRNs are allocated when a firm applies and can appear on the
+# Register months later, so re-check a window below the highest FRN seen as
+# well as a band above it.
+FRONTIER_BELOW = 3_000
+FRONTIER_ABOVE = 1_000
+
 SEARCH_TERMS = [
     "plc", "bank", "capital", "finance", "financial", "insurance", "investment",
     "investments", "asset", "wealth", "mortgage", "mortgages", "credit", "partners",
@@ -75,6 +86,7 @@ class State:
         self.path = raw_dir / "extract_state.json"
         data = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.sweep: dict = data.get("sweep", {})
+        self.frontier: dict = data.get("frontier", {})
         self.firms: dict[str, str] = data.get("firms", {})  # frn -> last fetched ISO time
         if not data:
             self._seed_from_existing_files()
@@ -102,7 +114,10 @@ class State:
     def save(self) -> None:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"sweep": self.sweep, "firms": self.firms}, indent=0, sort_keys=True))
+        tmp.write_text(json.dumps(
+                {"sweep": self.sweep, "frontier": self.frontier, "firms": self.firms},
+                indent=0, sort_keys=True,
+            ))
         tmp.replace(self.path)
 
     def report(self) -> None:
@@ -117,6 +132,12 @@ class State:
             print("Sweep position:  not started")
         oldest = min((v for v in self.firms.values() if v), default="")
         print(f"Oldest refresh:  {oldest[:19] or 'n/a'}")
+        highest = max((int(f) for f in self.firms if f.isdigit()), default=0)
+        fr = self.frontier
+        print(
+            f"Frontier:        highest FRN {highest:,}; last scan {fr.get('last_run', 'never')[:19]}"
+            + (f" ({fr.get('last_found', 0)} new)" if fr else "")
+        )
 
 
 # ------------------------------------------------------------------------ fetching
@@ -214,6 +235,39 @@ class Extractor:
             log.info("Sweep: COMPLETE. %s firms found up to FRN %s", sw["found"], stop)
         return found
 
+    def frontier_scan(self, force: bool = False) -> int:
+        """Look for newly registered firms around the highest known FRN (once a day)."""
+        today = f"{utcnow():%Y-%m-%d}"
+        if not force and self.state.frontier.get("last_run", "").startswith(today):
+            log.info("Frontier: already scanned today, skipping")
+            return 0
+        known = [int(f) for f in self.state.firms if f.isdigit()]
+        if not known:
+            log.info("Frontier: no known firms yet, skipping")
+            return 0
+        highest = max(known)
+        lo, hi = max(DEFAULT_SWEEP_START, highest - FRONTIER_BELOW), highest + FRONTIER_ABOVE
+        log.info("Frontier: checking FRNs %s-%s for new firms (highest known %s)", lo, hi, highest)
+
+        found, frn = 0, lo
+        while frn <= hi and self.time_left():
+            key = str(frn)
+            if not self.state.firms.get(key) and self.fetch_and_write(key):
+                found += 1
+                if frn > highest - 50:  # new firms near the top: keep scanning above them
+                    highest = frn
+                    hi = max(hi, frn + FRONTIER_ABOVE)
+            frn += 1
+        complete = frn > hi
+        self.state.frontier = {
+            "last_run": utcnow().isoformat() if complete else self.state.frontier.get("last_run", ""),
+            "last_found": found,
+            "highest": highest,
+        }
+        self.state.save()
+        log.info("Frontier: %s new firms (scan %s)", found, "complete" if complete else "stopped early")
+        return found
+
     def search(self, limit: int) -> int:
         """Discover new FRNs via search terms, fetching each new firm."""
         found = 0
@@ -238,7 +292,7 @@ class Extractor:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("mode", nargs="?", default="auto", choices=["auto", "sweep", "refresh", "search", "status"])
+    parser.add_argument("mode", nargs="?", default="auto", choices=["auto", "sweep", "refresh", "frontier", "search", "status"])
     parser.add_argument("--limit", type=int, help="max firms for refresh/search/auto (default FCA_FIRM_LIMIT or 2000)")
     parser.add_argument("--max-minutes", type=float, help="stop cleanly after this many minutes")
     parser.add_argument("--start", type=int, help=f"sweep: first FRN (default {DEFAULT_SWEEP_START}, else resume)")
@@ -265,10 +319,14 @@ def main() -> None:
             ex.refresh(limit)
         elif args.mode == "search":
             ex.search(limit)
+        elif args.mode == "frontier":
+            ex.frontier_scan(force=True)
         elif args.mode == "sweep":
             ex.sweep(args.start, args.end, args.limit)
         else:  # auto
             ex.refresh(limit)
+            if ex.time_left():
+                ex.frontier_scan()
             if args.max_minutes and ex.time_left():
                 ex.sweep(args.start, args.end)
     except FCAUnavailable as exc:

@@ -1,8 +1,9 @@
 name: FCA pipeline
 
 # Every 6 hours: download the warehouse from the "warehouse" release, refresh the
-# least-recently-checked firms, spend the remaining time continuing the FRN sweep,
-# rebuild dbt, and upload the warehouse again. Runs never overlap (concurrency).
+# least-recently-checked firms, scan the newest FRN range for new firms (once a
+# day), spend the remaining time continuing the FRN sweep, rebuild dbt, upload
+# the warehouse again, and publish the dashboard. Runs never overlap (concurrency).
 
 on:
   schedule:
@@ -56,6 +57,8 @@ jobs:
         env:
           FCA_API_EMAIL: ${{ secrets.FCA_API_EMAIL }}
           FCA_API_KEY: ${{ secrets.FCA_API_KEY }}
+          # seconds between API calls; the client slows itself down on HTTP 429
+          FCA_MIN_INTERVAL: ${{ vars.FCA_MIN_INTERVAL || '0.25' }}
         run: |
           bash run_pipeline.sh \
             --limit "${{ inputs.limit || vars.FCA_FIRM_LIMIT || '750' }}" \
@@ -73,3 +76,35 @@ jobs:
             gh release create warehouse --title "Warehouse (fca.duckdb)" \
               --notes "Latest DuckDB warehouse + extractor state, updated daily by the pipeline."
           gh release upload warehouse fca.duckdb data/raw/extract_state.json --clobber
+
+      - name: Build dashboard + dbt docs
+        if: always() && hashFiles('fca.duckdb') != ''
+        run: |
+          python dashboard/build_dashboard.py --out site/index.html
+          cd dbt/fca_dbt
+          dbt docs generate --static --profiles-dir .
+          mkdir -p ../../site/dbt && cp target/static_index.html ../../site/dbt/index.html
+
+      - name: Upload site for GitHub Pages
+        if: always() && hashFiles('site/index.html') != ''
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Publishes the dashboard at https://<user>.github.io/<repo>/ .
+  # Needs Settings -> Pages -> Source: "GitHub Actions" (one-time). Until then this
+  # job just warns; the data pipeline above is unaffected.
+  deploy-dashboard:
+    needs: run
+    if: always() && needs.run.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
