@@ -1,9 +1,10 @@
 name: FCA pipeline
 
 # Every 6 hours: download the warehouse from the "warehouse" release, refresh the
-# least-recently-checked firms, scan the newest FRN range for new firms (once a
-# day), spend the remaining time continuing the FRN sweep, rebuild dbt, upload
-# the warehouse again, and publish the dashboard. Runs never overlap (concurrency).
+# least-recently-checked firms, give the newest-FRN frontier its share of the
+# time, continue the FRN sweep with the rest, rebuild dbt, upload the warehouse,
+# and publish the dashboard. Progress is uploaded every 45 minutes during the
+# extract, so a lost runner costs minutes, not hours. Runs never overlap.
 
 on:
   schedule:
@@ -11,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Firms to refresh before sweeping (default 750)"
+        description: "Firms to refresh before sweeping (default 2000)"
         required: false
         default: ""
       minutes:
@@ -57,11 +58,18 @@ jobs:
         env:
           FCA_API_EMAIL: ${{ secrets.FCA_API_EMAIL }}
           FCA_API_KEY: ${{ secrets.FCA_API_KEY }}
-          # seconds between API calls; the client slows itself down on HTTP 429
+          # seconds between request starts; the client slows itself down on HTTP 429
           FCA_MIN_INTERVAL: ${{ vars.FCA_MIN_INTERVAL || '0.25' }}
+          # parallel requests (latency, not the API, was the bottleneck)
+          FCA_WORKERS: ${{ vars.FCA_WORKERS || '4' }}
+          # share of each run's remaining time for the newest-FRN frontier
+          FCA_FRONTIER_SHARE: ${{ vars.FCA_FRONTIER_SHARE || '0.35' }}
+          # save + upload progress during the run, so a lost runner costs minutes
+          FCA_CHECKPOINT_CMD: bash scripts/checkpoint.sh
+          FCA_CHECKPOINT_MINUTES: "45"
         run: |
           bash run_pipeline.sh \
-            --limit "${{ inputs.limit || vars.FCA_FIRM_LIMIT || '750' }}" \
+            --limit "${{ inputs.limit || vars.FCA_FIRM_LIMIT || '2000' }}" \
             --max-minutes "${{ inputs.minutes || '290' }}"
 
       - name: Progress

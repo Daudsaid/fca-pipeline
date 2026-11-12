@@ -101,9 +101,10 @@ flowchart LR
 
 - **Complete coverage from a limited API.** The free API has no bulk endpoint, so the extractor *sweeps* the firm reference number (FRN) space, *refreshes* known firms in rotation, and scans the *frontier* of newly issued FRNs daily (see [Extraction strategy](#extraction-strategy)).
 - **Fault-tolerant, resumable extraction.**
-  - **Checkpointing:** progress is saved to a state file, so Ctrl+C, a crash or a CI timeout (handled through `SIGTERM`) never loses more than a few records.
-  - **Outages:** an API outage raises a dedicated `FCAUnavailable` error rather than being misread as "firm does not exist", so the checkpoint never skips past failures.
-- **Adaptive rate limiting.** The client backs off when it receives HTTP 429 (×1.5 per throttle) and recovers gradually after sustained success, settling at the fastest pace the API accepts.
+  - **Checkpointing:** work runs in chunks of FRNs, and the checkpoint only advances once every FRN in a chunk has been answered, so Ctrl+C, a crash or a CI timeout (handled through `SIGTERM`) can never skip a firm.
+  - **Outages:** an API outage raises a dedicated `FCAUnavailable` error rather than being misread as "firm does not exist".
+  - **Mid-run uploads:** every 45 minutes during a scheduled run, progress is loaded and uploaded, so a lost CI runner costs minutes rather than hours.
+- **Parallel, rate-limited requests.** Request round-trip time, not the API's limit, was the bottleneck, so the extractor runs several requests concurrently while a shared, thread-safe pacer keeps the overall rate fixed (about 2.4× faster). It also backs off on HTTP 429 (×1.5 per throttle) and recovers gradually after sustained success.
 - **Change-only raw storage.** Each record is hashed (ignoring the API's own response timestamp), and only genuinely changed versions are stored. Redundant self-link fields are dropped, cutting storage by ~37%. Re-running any load is idempotent.
 - **Full history with SCD Type 2.** A dbt snapshot opens a new row whenever a tracked attribute changes, and custom tests guarantee that history periods never overlap and that each firm has exactly one current row.
 - **Serverless operations.** The warehouse lives as a GitHub Release asset between runs, which avoids git's 100 MB file limit and needs no database server. Every run downloads it, updates it, re-uploads it and republishes the dashboard.
@@ -146,9 +147,9 @@ The FCA Register API returns **one entity per request** and is rate limited. The
 |---|---|---|
 | `sweep` | **Backfill:** discover every firm | Requests each FRN from 100,000 to 1,050,000 and keeps those that exist. Position is checkpointed. |
 | `refresh` | **Freshness:** detect changes | Re-fetches known firms, least recently checked first, so the whole set rotates continuously. |
-| `frontier` | **New registrations** | Once a day, scans 3,000 FRNs below to 1,000 above the highest FRN seen, because FRNs are issued roughly in sequence but can appear on the Register after a delay. |
+| `frontier` | **Recent and new registrations** | Walks up through the newest FRNs (which are densely populated) with its own checkpoint, extending past each new firm it finds. Once caught up, it re-checks 3,000 FRNs below to 1,000 above the highest FRN seen once a day, because FRNs are issued roughly in sequence but can appear on the Register after a delay. |
 | `search` | Quick targeted discovery | Uses the Search endpoint with common terms. |
-| `auto` | Scheduled default | `refresh`, then `frontier` once a day, then `sweep` for the remaining time budget. |
+| `auto` | Scheduled default | `refresh`, then `frontier` for a fixed share of the remaining time (35% by default), then `sweep` for the rest. |
 | `status` | Monitoring | Prints coverage and sweep progress without calling the API. |
 
 Each fetched firm is written as one JSON line, holding the firm record plus its addresses, to `data/raw/firms_<date>.jsonl`. dbt then loads these files incrementally.
@@ -224,7 +225,10 @@ order by status_effective_date desc;
 |---|---|---|
 | `FCA_API_EMAIL`, `FCA_API_KEY` | (required) | FCA Register API credentials |
 | `FCA_FIRM_LIMIT` | `2000` | Firms to refresh per run |
-| `FCA_MIN_INTERVAL` | `0.5` (local), `0.25` (CI) | Seconds between API calls; adjusts automatically on HTTP 429 |
+| `FCA_MIN_INTERVAL` | `0.5` (local), `0.25` (CI) | Seconds between request starts, shared across workers; adjusts automatically on HTTP 429 |
+| `FCA_WORKERS` | `4` | Parallel requests |
+| `FCA_FRONTIER_SHARE` | `0.35` | Share of each scheduled run's remaining time given to the frontier |
+| `FCA_CHECKPOINT_CMD`, `FCA_CHECKPOINT_MINUTES` | (unset), `45` | Command run periodically during long extracts (CI uses `scripts/checkpoint.sh` to load and upload progress) |
 | `FCA_DUCKDB_PATH` | | Point the Streamlit app at a specific warehouse file |
 
 ---
@@ -233,7 +237,7 @@ order by status_effective_date desc;
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| [`daily_pipeline.yml`](.github/workflows/daily_pipeline.yml) | Every 6 hours (00:17, 06:17, 12:17, 18:17 UTC) and on demand | Downloads the warehouse from the `warehouse` release, refreshes 750 firms, runs the frontier scan, sweeps for the remaining time (max ~4.8 h), runs `dbt build`, uploads the warehouse, and publishes the dashboard and dbt docs to GitHub Pages |
+| [`daily_pipeline.yml`](.github/workflows/daily_pipeline.yml) | Every 6 hours (00:17, 06:17, 12:17, 18:17 UTC) and on demand | Downloads the warehouse from the `warehouse` release, refreshes 2,000 firms, gives the frontier its share of the time, sweeps for the rest (max ~4.8 h, uploading progress every 45 minutes), runs `dbt build`, uploads the warehouse, and publishes the dashboard and dbt docs to GitHub Pages |
 | [`ci.yml`](.github/workflows/ci.yml) | Every push and pull request | Unit tests, plus a full `dbt build` with all data tests on the seed data |
 
 **Why a GitHub Release for storage?** At full coverage the warehouse exceeds git's 100 MB file limit. A release asset (up to 2 GB) gives durable, versionless storage that the workflow and the Streamlit app can both read with no extra infrastructure. Runs never overlap, thanks to a workflow concurrency group.
@@ -251,17 +255,17 @@ order by status_effective_date desc;
 
 ```bash
 uv pip install -r requirements-dev.txt
-python -m pytest -v tests                  # 14 unit tests against a stand-in FCA API
+python -m pytest -v tests                  # 18 unit tests against a stand-in FCA API
 bash run_pipeline.sh --skip-extract        # dbt build + 19 data tests on the seed data
 ```
 
 **Unit tests (`tests/`)** spin up an in-process HTTP server that imitates the FCA Register API and verify that:
 - missing firms and outages are told apart
 - the client slows down on HTTP 429 and recovers afterwards
-- a sweep finds exactly the firms that exist, resumes without gaps or duplicates, and keeps its checkpoint through an outage
+- a parallel sweep finds exactly the firms that exist, resumes without gaps or duplicates, and retries a failed chunk instead of skipping it
 - refresh works oldest-first and rotates firms the API no longer returns
-- the frontier scan discovers newly registered firms and runs at most once a day
-- time limits stop the run cleanly
+- the frontier discovers new firms, respects its time budget, resumes from its own checkpoint, and runs its daily check at most once a day
+- the scheduled mode shares time between frontier and sweep, the mid-run checkpoint hook fires on schedule, and time limits stop the run cleanly
 
 **dbt tests** cover uniqueness and non-null keys at every layer, plus two custom tests on the SCD2 snapshot:
 - `assert_snapshot_periods_do_not_overlap`: no firm has overlapping validity windows.
@@ -274,8 +278,9 @@ bash run_pipeline.sh --skip-extract        # dbt build + 19 data tests on the se
 ```
 fca-pipeline/
 ├── extract/
-│   ├── fca_client.py          # API client: auth, adaptive rate limiting, retries
-│   └── extract_fca.py         # crawler: sweep / refresh / frontier / search, checkpointed state
+│   ├── fca_client.py          # API client: auth, thread-safe adaptive rate limiting, retries
+│   └── extract_fca.py         # parallel crawler: sweep / refresh / frontier / search, checkpointed state
+├── scripts/checkpoint.sh      # mid-run load + upload, used by the scheduled workflow
 ├── dbt/fca_dbt/
 │   ├── models/
 │   │   ├── raw/               # incremental, change-only load of JSONL into DuckDB

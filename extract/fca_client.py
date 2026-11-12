@@ -5,7 +5,9 @@ Docs / sign-up: https://register.fca.org.uk/Developer/s/
 Auth: two headers, X-Auth-Email and X-Auth-Key.
 
 The free API returns one entity per call and is rate limited, so this client:
-  * spaces calls out (FCA_MIN_INTERVAL seconds between requests, default 0.5)
+  * spaces calls out (FCA_MIN_INTERVAL seconds between request starts, default
+    0.5), shared across threads, so several requests can be in flight at once
+    while the overall pace stays the same
   * slows down (x1.5) whenever the API answers 429, then speeds back up
     gradually (5% per 100 successful calls) to the configured pace
   * retries on 429 / 5xx / network errors with exponential backoff
@@ -17,6 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from typing import Iterator, Optional
 
@@ -50,29 +53,41 @@ class FCAClient:
         self._ok_streak = 0
         self.max_retries = max_retries
         self.timeout = timeout
-        self._last_call = 0.0
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "X-Auth-Email": email,
-                "X-Auth-Key": api_key,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
-        )
+        self._headers = {
+            "X-Auth-Email": email,
+            "X-Auth-Key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+        self._local = threading.local()
+
+    @property
+    def session(self) -> requests.Session:
+        """One HTTP session per thread (requests.Session isn't guaranteed thread-safe)."""
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = requests.Session()
+            s.headers.update(self._headers)
+            self._local.session = s
+        return s
 
     # ------------------------------------------------------------------ core
     def _throttle(self) -> None:
-        wait = self.min_interval - (time.monotonic() - self._last_call)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call = time.monotonic()
+        """Reserve the next start slot; slots are min_interval apart across all threads."""
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_slot)
+            self._next_slot = start + self.min_interval
+            self.calls += 1
+        if start > now:
+            time.sleep(start - now)
 
     def get(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         for attempt in range(1, self.max_retries + 1):
             self._throttle()
-            self.calls += 1
             try:
                 resp = self.session.get(url, params=params, timeout=self.timeout)
             except requests.RequestException as exc:
@@ -87,20 +102,22 @@ class FCAClient:
                     "Check FCA_API_EMAIL / FCA_API_KEY."
                 )
             if resp.status_code == 429:
-                self._ok_streak = 0
-                new = min(5.0, self.min_interval * 1.5)
-                if new > self.min_interval:
-                    log.warning("Rate limited (429): slowing to one call every %.2fs", new)
-                self.min_interval = new
+                with self._lock:
+                    self._ok_streak = 0
+                    new = min(5.0, self.min_interval * 1.5)
+                    if new > self.min_interval:
+                        log.warning("Rate limited (429): slowing to one call every %.2fs", new)
+                    self.min_interval = new
             if resp.status_code == 429 or resp.status_code >= 500:
                 self._backoff(attempt, f"HTTP {resp.status_code}")
                 continue
 
             resp.raise_for_status()
-            self._ok_streak += 1
-            if self._ok_streak >= 100 and self.min_interval > self.base_interval:
-                self.min_interval = max(self.base_interval, self.min_interval * 0.95)
-                self._ok_streak = 0
+            with self._lock:
+                self._ok_streak += 1
+                if self._ok_streak >= 100 and self.min_interval > self.base_interval:
+                    self.min_interval = max(self.base_interval, self.min_interval * 0.95)
+                    self._ok_streak = 0
             try:
                 return resp.json()
             except ValueError:
