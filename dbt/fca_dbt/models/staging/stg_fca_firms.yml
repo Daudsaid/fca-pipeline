@@ -2,7 +2,10 @@ version: 2
 
 models:
   - name: stg_fca_firms
-    description: Latest known record for each FCA-registered firm.
+    description: >
+      Latest known record for each FCA-registered firm: parsed, typed and cleaned
+      (placeholder values nulled, town inferred from address lines when blank,
+      postcodes normalised and validated, suspect dates flagged).
     columns:
       - name: frn
         description: Firm Reference Number
@@ -11,7 +14,20 @@ models:
         data_tests:
           - not_null:
               config: {severity: warn}
+      - name: status_group
+        description: On the Register / Left the Register / PSD agent (see details) / Other
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['On the Register', 'Left the Register', 'PSD agent (see details)', 'Other']
       - name: firm_name
         data_tests:
           - not_null:
               config: {severity: warn}
+      - name: date_suspect
+        description: Status effective date before 1980 or in the future (kept, but likely a data-entry error)
+      - name: town_inferred
+        description: True when Town was blank and the town came from Address Line 4 or 3
+      - name: postcode_valid
+        description: UK postcodes only - does it match the UK postcode format? NULL for overseas or missing.

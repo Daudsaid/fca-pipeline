@@ -21,7 +21,9 @@ models:
       +materialized: incremental
     staging:
       +schema: staging
-      +materialized: view
+      # a table, not a view: parsing ~100k+ JSON records once per build instead
+      # of once per test keeps memory flat as the Register data grows
+      +materialized: table
     intermediate:
       +schema: intermediate
       +materialized: view

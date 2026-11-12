@@ -91,7 +91,7 @@ flowchart LR
 |---|---|---|
 | Extract | Python, `requests` | Rate-limited, retrying, resumable API client and crawler |
 | Load + store | DuckDB 2.0 | Single-file columnar warehouse; reads JSONL natively |
-| Transform | dbt Core + `dbt-duckdb` | Staging, SCD2 snapshot, intermediate and mart models, plus 19 data tests |
+| Transform | dbt Core + `dbt-duckdb` | Staging, SCD2 snapshot, intermediate and mart models, plus 22 data tests |
 | Orchestrate | GitHub Actions | Scheduled runs, CI, warehouse persistence, Pages deployment |
 | Serve | Streamlit, static HTML, dbt docs | Interactive exploration, public dashboard, lineage |
 
@@ -119,10 +119,10 @@ All models live in a single DuckDB file, organised by schema.
 | Schema | Model | Grain | Description |
 |---|---|---|---|
 | `raw` | `raw_fca_firms` | firm × version | API JSON as returned (self-links removed). New row only when content changes. Incremental. |
-| `staging` | `stg_fca_firms` | firm | Latest version of each firm, with JSON parsed into typed columns, dates normalised, placeholder values (`NA`) nulled, and the principal place of business selected from the address list. |
+| `staging` | `stg_fca_firms` | firm | Latest version of each firm, with JSON parsed into typed columns and cleaned (see [Data quality](#data-quality)). Adds `status_group` (On the Register / Left the Register / PSD agent / Other). Materialised as a table so tests don't re-parse the JSON. |
 | `snapshots` | `snap_fca_firms` | firm × validity period | SCD Type 2 history on name, status, sub-status, business type and postcode (`dbt_valid_from` / `dbt_valid_to`). |
 | `intermediate` | `int_fca_status_changes` | status transition | Each status change, with the FCA's effective date and the time the pipeline detected it. |
-| `marts` | `mart_fca_firms_current` | firm | Current state of every firm: the open snapshot rows. |
+| `marts` | `mart_fca_firms_current` | firm | Current state of every firm: cleaned attributes from staging, with `current_since` from the open SCD2 row. |
 | `marts` | `mart_fca_status_summary` | status | Firm counts and share by current status. |
 | `marts` | `mart_fca_status_changes_monthly` | month × transition | Monthly trend of status transitions. |
 
@@ -256,7 +256,7 @@ order by status_effective_date desc;
 ```bash
 uv pip install -r requirements-dev.txt
 python -m pytest -v tests                  # 18 unit tests against a stand-in FCA API
-bash run_pipeline.sh --skip-extract        # dbt build + 19 data tests on the seed data
+bash run_pipeline.sh --skip-extract        # dbt build + 22 data tests on the seed data
 ```
 
 **Unit tests (`tests/`)** spin up an in-process HTTP server that imitates the FCA Register API and verify that:
@@ -267,7 +267,20 @@ bash run_pipeline.sh --skip-extract        # dbt build + 19 data tests on the se
 - the frontier discovers new firms, respects its time budget, resumes from its own checkpoint, and runs its daily check at most once a day
 - the scheduled mode shares time between frontier and sweep, the mid-run checkpoint hook fires on schedule, and time limits stop the run cleanly
 
-**dbt tests** cover uniqueness and non-null keys at every layer, plus two custom tests on the SCD2 snapshot:
+### Data quality
+
+The FCA's source data has quirks, which staging handles explicitly. Each rule was found by auditing the real data:
+
+| Source quirk | Handling |
+|---|---|
+| `Town` blank while the town sits in Address Line 3/4 (and the API misspells the key as `"Address LIne 3"`) | Town falls back to line 4, then 3, skipping numbers, postcodes, the country and street/building names; flagged `town_inferred` |
+| Inconsistent place names (`LONDON`, `london`, `London,`) | Title-cased, trailing punctuation removed |
+| `01/01/1901` used as "unknown date" | Becomes NULL |
+| Implausible dates (e.g. 1817, a founding date entered by mistake) | Kept, flagged `date_suspect` |
+| Placeholder or malformed postcodes (`-`, `N/A`, `SS1 1JE.`) | Placeholders nulled, punctuation stripped; UK postcodes validated into `postcode_valid` |
+| Repeated whitespace in names, `NA` status | Collapsed / nulled |
+
+**dbt tests** cover uniqueness and non-null keys at every layer, accepted values for `status_group`, a warning-level data-quality watchlist (suspect dates and invalid UK postcodes), plus two custom tests on the SCD2 snapshot:
 - `assert_snapshot_periods_do_not_overlap`: no firm has overlapping validity windows.
 - `assert_one_current_row_per_firm`: every firm has exactly one open row.
 
