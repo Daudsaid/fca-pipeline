@@ -19,6 +19,11 @@ on:
         description: "Max extract minutes (default 290)"
         required: false
         default: ""
+      bootstrap:
+        description: "Rebuild from the seed data if the warehouse can't be downloaded (ONLY for a deliberate rebuild)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write                # to update the warehouse release
@@ -45,14 +50,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Download warehouse
-        run: |
-          mkdir -p /tmp/wh data/raw
-          if gh release download warehouse -D /tmp/wh -p fca.duckdb -p extract_state.json; then
-            mv /tmp/wh/fca.duckdb . && mv /tmp/wh/extract_state.json data/raw/ || true
-            ls -lh fca.duckdb
-          else
-            echo "No warehouse release yet: starting from the seed data"
-          fi
+        env:
+          BOOTSTRAP: ${{ inputs.bootstrap || 'false' }}
+        run: bash scripts/download_warehouse.sh
 
       - name: Run pipeline (extract -> dbt build)
         env:
@@ -76,14 +76,9 @@ jobs:
         if: always()
         run: python extract/extract_fca.py status || true
 
-      - name: Upload warehouse
-        if: always()
-        run: |
-          [ -f fca.duckdb ] || { echo "no warehouse to upload"; exit 0; }
-          gh release view warehouse >/dev/null 2>&1 || \
-            gh release create warehouse --title "Warehouse (fca.duckdb)" \
-              --notes "Latest DuckDB warehouse + extractor state, updated daily by the pipeline."
-          gh release upload warehouse fca.duckdb data/raw/extract_state.json --clobber
+      - name: Upload warehouse (+ daily backup)
+        if: always() && hashFiles('fca.duckdb') != ''
+        run: bash scripts/upload_warehouse.sh
 
       - name: Build dashboard + dbt docs
         if: always() && hashFiles('fca.duckdb') != ''

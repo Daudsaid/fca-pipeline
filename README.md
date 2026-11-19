@@ -240,6 +240,13 @@ order by status_effective_date desc;
 | [`daily_pipeline.yml`](.github/workflows/daily_pipeline.yml) | Every 6 hours (00:17, 06:17, 12:17, 18:17 UTC) and on demand | Downloads the warehouse from the `warehouse` release, refreshes 2,000 firms, gives the frontier its share of the time, sweeps for the rest (max ~4.8 h, uploading progress every 45 minutes), runs `dbt build`, uploads the warehouse, and publishes the dashboard and dbt docs to GitHub Pages |
 | [`ci.yml`](.github/workflows/ci.yml) | Every push and pull request | Unit tests, plus a full `dbt build` with all data tests on the seed data |
 
+**Data safety.** The warehouse is the only copy of the collected history, so every run protects it:
+- **No silent restarts:** a failed download is retried, then fails the run. It is never treated as "start from scratch" (`scripts/download_warehouse.sh`). Rebuilding from the seed data requires a deliberate manual run with `bootstrap=true`.
+- **Never go backwards:** an upload is refused if it would hold fewer firms than were downloaded (`scripts/upload_warehouse.sh`).
+- **Daily backups:** the first upload each day is also copied to the `backups` release, keeping 7 days.
+
+These were added after a transient GitHub error in November 2026 made the original workflow rebuild from the seed and overwrite the warehouse; it was restored from a backup copy.
+
 **Why a GitHub Release for storage?** At full coverage the warehouse exceeds git's 100 MB file limit. A release asset (up to 2 GB) gives durable, versionless storage that the workflow and the Streamlit app can both read with no extra infrastructure. Runs never overlap, thanks to a workflow concurrency group.
 
 **Deploying your own copy**
@@ -293,7 +300,7 @@ fca-pipeline/
 ├── extract/
 │   ├── fca_client.py          # API client: auth, thread-safe adaptive rate limiting, retries
 │   └── extract_fca.py         # parallel crawler: sweep / refresh / frontier / search, checkpointed state
-├── scripts/checkpoint.sh      # mid-run load + upload, used by the scheduled workflow
+├── scripts/                   # safe warehouse download/upload (+ daily backups), mid-run checkpoint
 ├── dbt/fca_dbt/
 │   ├── models/
 │   │   ├── raw/               # incremental, change-only load of JSONL into DuckDB
